@@ -1,9 +1,9 @@
 use std::fs::File;
-use std::io::Write;
 
 use super::error::{Error,Result};
 use super::report::dump_error;
 
+use crate::algebra::FS;
 use crate::evaluator::{Evaluator, Mode, ScopeValue};
 use crate::storage::{Constraints, Signals, StorageFactory};
 use crate::evaluator::{check_constrains_eval_zero};
@@ -15,6 +15,7 @@ pub fn run_embeeded_tests<F, S, C>(
     debug : bool,
     skip_compile: bool,
     output_witness: bool,
+    test_prefix : &str,
 ) -> Result<Option<(Evaluator<S, C>, String)>>
 where
     S: Signals,
@@ -30,16 +31,17 @@ where
     match eval.eval_file(&path, &filename) {
         Ok(scan_scope) => {
 
-        let tests = scan_scope
-            .vars
-            .borrow()
-            .iter()
-            .filter_map(|(k, v)| match v {
-                ScopeValue::Template { attrs, .. } if attrs.has_tag_test() => Some(k),
-                _ => None,
-            })
-            .map(|f| f.to_string())
-            .collect::<Vec<_>>();
+            let tests = scan_scope
+                .vars
+                .borrow()
+                .iter()
+                .filter_map(|(k, v)| match v {
+                    ScopeValue::Template { attrs, .. } if attrs.has_tag_test() => Some(k),
+                    _ => None,
+                })
+                .map(|template_name| template_name.to_string())
+                .filter(|template_name| template_name.starts_with(test_prefix))
+                .collect::<Vec<_>>();
 
             for test_name in tests.iter() {
 
@@ -59,12 +61,14 @@ where
                 }
 
                 if output_witness {
-                    let mut witness_file = File::create(format!("./{}.witness",test_name))?;
-                    witness_file.write_all(format!("1\n").as_bytes())?;
-                    for n in 1..ev_witness.signals.len()? {
+                    let mut witness_file = File::create(format!("./{}.binwitness",test_name))?;
+                    let witness_len = ev_witness.signals.len()?;
+                    FS::from(witness_len as u64).write_256_w32(&mut witness_file)?;
+                    FS::from(1).write_256_w32(&mut witness_file)?;
+                    for n in 1..witness_len {
                         let signal = &*ev_witness.signals.get_by_id(n).unwrap().unwrap();
-                        let value_str = format!("{}\n",signal.value.clone().unwrap().try_into_fs().unwrap().0.to_string());
-                        witness_file.write_all(value_str.as_bytes())?;
+                        let value = signal.value.clone().unwrap().try_into_fs().unwrap();
+                        value.write_256_w32(&mut witness_file)?;
                     }  
                 }
 

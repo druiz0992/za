@@ -30,12 +30,16 @@ const DEFAULT_CIRCUIT : &str = "circuit.circom";
 const DEFAULT_PROVING_KEY : &str = "proving.key";
 const DEFAULT_INPUT : &str = "input.json";
 const DEFAULT_PROOF : &str = "proof.json";
-const DEFAULT_SOLIDITY_VERIFIER : &str = "verifier.sol";
+const DEFAULT_VERIFIER_SOLIDITY : &str = "verifier.sol";
+const DEFAULT_VERIFIER_JSON : &str = "verifier.json";
+const VERIFIER_TYPE_SOLIDITY : &str = "solidity";
+const VERIFIER_TYPE_JSON : &str = "json";
+const DEFAULT_VERIFIER_TYPE : &str = VERIFIER_TYPE_SOLIDITY;
 
 fn generate_cuda<S:Signals,C:Constraints>(eval : &Evaluator<S,C>, cuda_file : Option<String>) {
     if let Some(cuda_file) = cuda_file {
         let start = SystemTime::now();
-        circom2_prover::cuda::export_r1cs(&cuda_file, &eval.constraints, &eval.signals).unwrap();
+        circom2_compiler::cuda::export_r1cs(&cuda_file, &eval.constraints, &eval.signals).unwrap();
         info!("Cuda generation time: {:?}",SystemTime::now().duration_since(start).unwrap());
     }
 }
@@ -96,13 +100,24 @@ struct Opt {
     cfg: String,
 }
 
+#[derive(StructOpt,Debug)]
+enum VerifierType {
+    #[structopt(name = "json")]
+    /// JSON with validation params 
+    JSON{},
+
+    #[structopt(name = "solidity")]
+    /// Solidity smartcontract
+    Solidity{},
+}
+
 #[derive(StructOpt)]
 enum Command {
     #[structopt(name = "compile")]
     /// Only compile the circuit
     Compile {
         #[structopt(long = "circuit")]
-        /// Circuit, defaults to circuit.circom
+        /// Input circuit, defaults to circuit.circom
         circuit: Option<String>,
 
         #[structopt(long = "disk")]
@@ -121,54 +136,64 @@ enum Command {
     /// Compile & generate trusted setup
     Setup {
         #[structopt(long = "circuit")]
-        /// Circuit, defaults to circuit.circom
+        /// Input circuit, defaults to circuit.circom
         circuit: Option<String>,
 
         #[structopt(long = "pk")]
-        /// Proving key file, defaults to prover.key
+        /// Output proving key output file, defaults to prover.key
         pk: Option<String>,
 
         #[structopt(long = "verifier")]
-        /// Solidity verifier
-        verifier: Option<String>,
+        /// Output verifier file 
+        verifier_file: Option<String>,
+
+        #[structopt(long = "verifiertype")]
+        /// Verifier type, solidity (default) or json 
+        verifier_type: Option<String>,
     },
+
     #[structopt(name = "prove")]
-    /// Compile & generate trusted setup
+    /// Generate a proof
     Prove {
         #[structopt(long = "circuit")]
-        /// Circuit, defaults to circuit.circom
+        /// Input circuit, defaults to circuit.circom
         circuit: Option<String>,
 
         #[structopt(long = "pk")]
-        /// Proving key file, defaults to prover.key
+        /// Input proving key file, defaults to prover.key
         pk: Option<String>,
 
         #[structopt(long = "input")]
-        /// Public inputs file, defaults to input.json
+        /// Input inputs file, defaults to input.json
         input: Option<String>,
 
         #[structopt(long = "proof")]
-        /// Proof file, defaults to proof.json
+        /// Ouput proof file, defaults to proof.json
         proof: Option<String>,
     },
+
     #[structopt(name = "test")]
     /// Run embeeded circuit tests
     Test {
         #[structopt(long = "circuit")]
-        /// Circuit, defaults to circuit.circom
+        /// Input circuit, defaults to circuit.circom
         circuit: Option<String>,
 
         #[structopt(long = "debug")]
         /// Turn on debugging
         debug: bool,
 
-        /// Dump witness
+        /// Genetate binary witness file 
         #[structopt(long = "outputwitness")]
         outputwitness: bool,
 
         /// Skip circuit compilation
         #[structopt(long = "skipcompile")]
         skipcompile: bool,
+
+        /// Prefix of the tests to execute
+        #[structopt(long = "prefix")]
+        prefix: Option<String>,
 
     },
 }
@@ -192,17 +217,34 @@ fn main() {
                 compile_ram(&circuit,print,cuda)
             }
         }
-        Command::Setup { circuit, pk, verifier } => {
+        Command::Setup { circuit, pk, verifier_file, verifier_type } => {
             let circuit = circuit.unwrap_or(DEFAULT_CIRCUIT.to_string());
             let pk = pk.unwrap_or(DEFAULT_PROVING_KEY.to_string());
-            let verifier = verifier.unwrap_or(DEFAULT_SOLIDITY_VERIFIER.to_string());
-            circom2_prover::groth16::setup_ram(&circuit,&pk,&verifier)
+            let verifier_type = match verifier_type.unwrap_or(DEFAULT_VERIFIER_TYPE.to_string()).as_ref() {
+                VERIFIER_TYPE_JSON => circom2_prover::groth16::VerifierType::JSON,
+                VERIFIER_TYPE_SOLIDITY => circom2_prover::groth16::VerifierType::Solidity,
+                _ => panic!("unknown verifier type")
+            };
+            let verifier_file = verifier_file.unwrap_or(
+                match verifier_type {
+                    circom2_prover::groth16::VerifierType::Solidity => DEFAULT_VERIFIER_SOLIDITY,
+                    circom2_prover::groth16::VerifierType::JSON => DEFAULT_VERIFIER_JSON,
+                }.to_string()
+            );
+            let verifier = circom2_prover::groth16::setup_ram(&circuit,&pk,verifier_type)
                 .expect("unable to create proof");
+
+            File::create(verifier_file)
+                .expect("cannot create verifier file")
+                .write_all(verifier.as_bytes())
+                .expect("cannot write verifier file");
+
         }
-        Command::Test { circuit, debug, outputwitness, skipcompile } => {
+        Command::Test { circuit, debug, outputwitness, skipcompile, prefix } => {
             let circuit = circuit.unwrap_or(DEFAULT_CIRCUIT.to_string());
+            let prefix = prefix.unwrap_or("".to_string());
             let ram = Ram::default();
-            match tester::run_embeeded_tests(".", &circuit, ram, debug, skipcompile, outputwitness) {
+            match tester::run_embeeded_tests(".", &circuit, ram, debug, skipcompile, outputwitness, &prefix) {
                 Ok(Some((eval, err))) => dump_error(&eval, &err),
                 Err(err) => warn!("Error: {:?}", err),
                 _ => {}

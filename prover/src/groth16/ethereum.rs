@@ -1,8 +1,8 @@
 use pairing::bn256::Bn256;
 use bellman::groth16::VerifyingKey;
 use std::io::Write;
+use pairing::ff::PrimeField;
 
-use super::format;
 use super::error::Result;
 
 const CONTRACT_TEMPLATE: &str = r#"
@@ -170,12 +170,15 @@ contract Verifier {
         <%vk_gammaABC_pts%>
     }
     function verify(uint[] memory input, Proof memory proof) internal returns (uint) {
+        uint256 snark_scalar_field = 21888242871839275222246405745257275088548364400416034343698204186575808495617;
         VerifyingKey memory vk = verifyingKey();
         require(input.length + 1 == vk.gammaABC.length);
         // Compute the linear combination vk_x
         Pairing.G1Point memory vk_x = Pairing.G1Point(0, 0);
-        for (uint i = 0; i < input.length; i++)
+        for (uint i = 0; i < input.length; i++) {
+            require(input[i] < snark_scalar_field, "err-input-not-in-field");
             vk_x = Pairing.addition(vk_x, Pairing.scalar_mul(vk.gammaABC[i + 1], input[i]));
+        }
         vk_x = Pairing.addition(vk_x, vk.gammaABC[0]);
         if(!Pairing.pairingProd4(
              proof.A, proof.B,
@@ -185,15 +188,16 @@ contract Verifier {
         return 0;
     }
     event Verified(string s);
+    // input = <%vk_inputs%>
     function verifyTx(
             uint[2] memory a,
             uint[2][2] memory b,
             uint[2] memory c,
-            uint[<%vk_input_length%>] memory input
+            uint[<%vk_inputs_length%>] memory input
         ) public returns (bool r) {
         Proof memory proof;
         proof.A = Pairing.G1Point(a[0], a[1]);
-        proof.B = Pairing.G2Point([b[0][0], b[0][1]], [b[1][0], b[1][1]]);
+        proof.B = Pairing.G2Point([b[0][1], b[0][0]], [b[1][1], b[1][0]]);
         proof.C = Pairing.G1Point(c[0], c[1]);
         uint[] memory inputValues = new uint[](input.length);
         for(uint i = 0; i < input.length; i++){
@@ -209,14 +213,24 @@ contract Verifier {
 }
 "#;
 
-pub fn generate_solidity<W : Write>(vk: &VerifyingKey<Bn256>, input_length: usize, out: &mut W) -> Result<()> {
+pub fn generate_solidity<W : Write>(vk: &VerifyingKey<Bn256>, inputs: &[String], out: &mut W) -> Result<()> {
+
+    let str_g1 = |g1: &<Bn256 as bellman::pairing::Engine>::G1Affine| {
+        let (x,y) = g1.try_to_coordinates().expect("non-infinite point expected");
+        format!("{},{}",x.into_repr(), y.into_repr())
+    }; 
+    let str_g2 = |g2: &<Bn256 as bellman::pairing::Engine>::G2Affine| {
+        let (x,y) = g2.try_to_coordinates().expect("non-infinite point expected");
+        format!("[{},{}],[{},{}]",x.c1.into_repr(), x.c0.into_repr(), y.c1.into_repr(), y.c0.into_repr())
+    }; 
 
     let mut contract = String::from(CONTRACT_TEMPLATE);
-    contract = contract.replace("<%vk_a%>", &format::parse_g1_hex(&vk.alpha_g1));
-    contract = contract.replace("<%vk_b%>", &format::parse_g2_hex(&vk.beta_g2));
-    contract = contract.replace("<%vk_gamma%>", &format::parse_g2_hex(&vk.gamma_g2));
-    contract = contract.replace("<%vk_delta%>", &format::parse_g2_hex(&vk.delta_g2));
-    contract = contract.replace("<%vk_input_length%>", &format!("{}",input_length));
+    contract = contract.replace("<%vk_a%>", &str_g1( &vk.alpha_g1 ));
+    contract = contract.replace("<%vk_b%>", &str_g2( &vk.beta_g2 ));
+    contract = contract.replace("<%vk_gamma%>", &str_g2( &vk.gamma_g2 ));
+    contract = contract.replace("<%vk_delta%>", &str_g2( &vk.delta_g2 ));
+    contract = contract.replace("<%vk_inputs_length%>", &format!("{}",inputs.len()));
+    contract = contract.replace("<%vk_inputs%>", &format!("{:?}",inputs));
     contract = contract.replace(
         "<%vk_gammaABC_length%>",
         &format!("{}", &vk.ic.len()),
@@ -227,7 +241,7 @@ pub fn generate_solidity<W : Write>(vk: &VerifyingKey<Bn256>, input_length: usiz
             .ic
             .iter()
             .enumerate()
-            .map(|(i, x)| format!("vk.gammaABC[{}] = Pairing.G1Point({});", i, format::parse_g1_hex(x)))
+            .map(|(i, x)| format!("vk.gammaABC[{}] = Pairing.G1Point({});", i, &str_g1(x)))
             .collect::<Vec<_>>()
             .join("\n"),
     );
