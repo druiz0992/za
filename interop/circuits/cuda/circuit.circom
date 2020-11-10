@@ -17,10 +17,10 @@ template T(N) {
 
 #[test]
 template test1() {
-	component main = T(10000);
+	component main = T((1<<16)-1000);
 	#[w] {
 		main.p <== 2;
 	}
 }
 
-component main = T(10000);
+component main = T((1<<16)-1000);
